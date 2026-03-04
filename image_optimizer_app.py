@@ -63,11 +63,11 @@ class ImageOptimizerApp:
         
         # JPEG品質
         ttk.Label(settings_frame, text="JPEG品質:").grid(row=0, column=0, sticky=tk.W)
-        self.quality_var = tk.IntVar(value=90)
+        self.quality_var = tk.IntVar(value=87)
         quality_frame = ttk.Frame(settings_frame)
         quality_frame.grid(row=0, column=1, sticky=tk.W, padx=(10, 0))
         ttk.Scale(quality_frame, from_=50, to=100, variable=self.quality_var, orient=tk.HORIZONTAL, length=200).pack(side=tk.LEFT)
-        self.quality_label = ttk.Label(quality_frame, text="90")
+        self.quality_label = ttk.Label(quality_frame, text="87")
         self.quality_label.pack(side=tk.LEFT, padx=(10, 0))
         self.quality_var.trace('w', self.update_quality_label)
         
@@ -75,6 +75,11 @@ class ImageOptimizerApp:
         ttk.Label(settings_frame, text="目標高さ(ピクセル):").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
         self.height_var = tk.IntVar(value=1200)
         ttk.Entry(settings_frame, textvariable=self.height_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=(10, 0))
+        
+        # 最小ファイルサイズ（KB）
+        ttk.Label(settings_frame, text="最小ファイルサイズ(KB, 0で無制限):").grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+        self.min_size_var = tk.IntVar(value=400)
+        ttk.Entry(settings_frame, textvariable=self.min_size_var, width=10).grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=(10, 0))
         
         # 処理ボタン
         self.process_button = ttk.Button(main_frame, text="処理開始", command=self.start_processing)
@@ -158,7 +163,7 @@ class ImageOptimizerApp:
             self.log(f"エラー {input_path}: {e}")
             return 0, 0, 0
     
-    def process_folder_images(self, input_dir, output_dir, quality, target_height):
+    def process_folder_images(self, input_dir, output_dir, quality, target_height, min_size_kb):
         """フォルダ内の画像ファイルを処理"""
         
         if not os.path.exists(output_dir):
@@ -178,6 +183,11 @@ class ImageOptimizerApp:
         for image_file in image_files:
             i+=1
             input_path = os.path.join(input_dir, image_file)
+            original_size_kb = os.path.getsize(input_path) / 1024
+            if min_size_kb > 0 and original_size_kb < min_size_kb:
+                self.log(f"{image_file}: {original_size_kb:.2f} KB (しきい値未満のためスキップ)")
+                self.log(f"処理中: {i}/{len(image_files)}")
+                continue
             base_name = os.path.splitext(image_file)[0]
             output_path = os.path.join(output_dir, f"{base_name}.jpg")
             reduction, original_size, new_size = self.optimize_image(input_path, output_path, quality, target_height)
@@ -190,7 +200,7 @@ class ImageOptimizerApp:
         self.log(f"総削減量: {total_reduction_mb:.2f} MB")
         self.log("フォルダ処理完了！")
     
-    def process_zip_file(self, zip_path, output_dir, temp_dir, quality, target_height):
+    def process_zip_file(self, zip_path, output_dir, temp_dir, quality, target_height, min_size_kb):
         """単一のZIPファイルを処理"""
         zip_name = os.path.splitext(os.path.basename(zip_path))[0]
         temp_zip_dir = os.path.join(temp_dir, zip_name)
@@ -218,6 +228,11 @@ class ImageOptimizerApp:
         
         # 画像を変換
         for i, (abs_path, rel_path) in enumerate(image_files, 1):
+            original_size_kb = os.path.getsize(abs_path) / 1024
+            if min_size_kb > 0 and original_size_kb < min_size_kb:
+                self.log(f"{rel_path}: {original_size_kb:.2f} KB (しきい値未満のためスキップ)")
+                self.log(f"ZIP内処理中: {i}/{len(image_files)}")
+                continue
             rel_jpg_path = os.path.splitext(rel_path)[0] + ".jpg"
             out_abs_path = os.path.join(output_jpg_dir, rel_jpg_path)
             out_abs_dir = os.path.dirname(out_abs_path)
@@ -240,7 +255,7 @@ class ImageOptimizerApp:
         # 一時ディレクトリ削除
         shutil.rmtree(temp_zip_dir, ignore_errors=True)
         
-    def process_zip_files(self, input_dir, output_dir, quality, target_height):
+    def process_zip_files(self, input_dir, output_dir, quality, target_height, min_size_kb):
         """ZIPファイルを処理"""
         temp_dir = os.path.join(self.exe_dir, "temp_extracted")
         if not os.path.exists(temp_dir):
@@ -258,7 +273,7 @@ class ImageOptimizerApp:
         
         # 各ZIPを処理
         for zip_file in zip_files:
-            self.process_zip_file(os.path.join(input_dir, zip_file), output_dir, temp_dir, quality, target_height)
+            self.process_zip_file(os.path.join(input_dir, zip_file), output_dir, temp_dir, quality, target_height, min_size_kb)
         
         # 一時ディレクトリ削除
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -271,6 +286,7 @@ class ImageOptimizerApp:
         quality = self.quality_var.get()
         target_height = self.height_var.get()
         process_type = self.process_type.get()
+        min_size_kb = self.min_size_var.get()
         
         # 入力検証
         if not os.path.exists(input_dir):
@@ -288,9 +304,9 @@ class ImageOptimizerApp:
         def process_thread():
             try:
                 if process_type == "folder":
-                    self.process_folder_images(input_dir, output_dir, quality, target_height)
+                    self.process_folder_images(input_dir, output_dir, quality, target_height, min_size_kb)
                 else:
-                    self.process_zip_files(input_dir, output_dir, quality, target_height)
+                    self.process_zip_files(input_dir, output_dir, quality, target_height, min_size_kb)
             except Exception as e:
                 self.log(f"処理中にエラーが発生しました: {e}")
             finally:
