@@ -149,11 +149,13 @@ class ImageOptimizerApp:
                 target_width = int(target_height * aspect_ratio)
                 img = img.resize((target_width, target_height), Image.LANCZOS)
             
+            # サイズ計算（上書き前の元サイズを先に取得）
+            original_size = os.path.getsize(input_path) / 1024
+
             # JPEG保存
             img.save(output_path, 'JPEG', quality=quality, icc_profile=icc_profile)
             
-            # サイズ計算
-            original_size = os.path.getsize(input_path) / 1024
+            # 新しいサイズを取得
             new_size = os.path.getsize(output_path) / 1024
             reduction = original_size - new_size
             
