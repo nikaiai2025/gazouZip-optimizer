@@ -55,7 +55,8 @@ class ImageOptimizerApp:
         process_frame = ttk.Frame(main_frame)
         process_frame.grid(row=5, column=0, sticky=tk.W, pady=(0, 10))
         ttk.Radiobutton(process_frame, text="フォルダ内の画像ファイル", variable=self.process_type, value="folder").pack(side=tk.LEFT, padx=(0, 20))
-        ttk.Radiobutton(process_frame, text="ZIPファイル", variable=self.process_type, value="zip").pack(side=tk.LEFT)
+        ttk.Radiobutton(process_frame, text="ZIPファイル", variable=self.process_type, value="zip").pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(process_frame, text="各フォルダを処理してZIP化", variable=self.process_type, value="folder_zip").pack(side=tk.LEFT)
         
         # 設定フレーム
         settings_frame = ttk.LabelFrame(main_frame, text="設定", padding="10")
@@ -165,6 +166,62 @@ class ImageOptimizerApp:
             self.log(f"エラー {input_path}: {e}")
             return 0, 0, 0
     
+    def process_single_folder_to_zip(self, folder_path, output_dir, temp_dir, quality, target_height, min_size_kb):
+        """単一フォルダ内の画像を処理してZIP化"""
+        folder_name = os.path.basename(folder_path)
+        work_dir = os.path.join(temp_dir, folder_name)
+        output_img_dir = os.path.join(work_dir, "_imgs")
+        os.makedirs(output_img_dir, exist_ok=True)
+
+        # フォルダ内の画像ファイルを再帰的に取得
+        image_files = []
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                    abs_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(abs_path, folder_path)
+                    image_files.append((abs_path, rel_path))
+
+        if not image_files:
+            self.log(f"{folder_name}: 画像ファイルが見つからないためスキップ")
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return
+
+        self.log(f"フォルダ処理: {folder_name} ({len(image_files)} ファイル)")
+
+        for i, (abs_path, rel_path) in enumerate(image_files, 1):
+            original_size_kb = os.path.getsize(abs_path) / 1024
+            if min_size_kb > 0 and original_size_kb < min_size_kb:
+                # しきい値未満は再圧縮せず元ファイルを保持
+                passthrough_path = os.path.join(output_img_dir, rel_path)
+                passthrough_dir = os.path.dirname(passthrough_path)
+                os.makedirs(passthrough_dir, exist_ok=True)
+                shutil.copy2(abs_path, passthrough_path)
+                self.log(f"{folder_name}/{rel_path}: {original_size_kb:.2f} KB (しきい値未満のためスキップ)")
+                self.log(f"フォルダ内処理中: {i}/{len(image_files)}")
+                continue
+
+            rel_jpg_path = os.path.splitext(rel_path)[0] + ".jpg"
+            out_abs_path = os.path.join(output_img_dir, rel_jpg_path)
+            out_abs_dir = os.path.dirname(out_abs_path)
+            os.makedirs(out_abs_dir, exist_ok=True)
+
+            reduction, original_size, new_size = self.optimize_image(abs_path, out_abs_path, quality, target_height)
+            if new_size > 0:
+                self.log(f"{folder_name}/{rel_path}: {original_size:.2f} KB -> {new_size:.2f} KB")
+            self.log(f"フォルダ内処理中: {i}/{len(image_files)}")
+
+        zip_output = os.path.join(output_dir, f"{folder_name}_resized.zip")
+        with zipfile.ZipFile(zip_output, 'w', zipfile.ZIP_DEFLATED) as zip_ref:
+            for root, dirs, files in os.walk(output_img_dir):
+                for file in files:
+                    abs_file = os.path.join(root, file)
+                    rel_file = os.path.relpath(abs_file, output_img_dir)
+                    zip_ref.write(abs_file, rel_file)
+
+        shutil.rmtree(work_dir, ignore_errors=True)
+        self.log(f"{folder_name}: ZIP作成完了 ({zip_output})")
+
     def process_folder_images(self, input_dir, output_dir, quality, target_height, min_size_kb):
         """フォルダ内の画像ファイルを処理"""
         
@@ -201,6 +258,37 @@ class ImageOptimizerApp:
         total_reduction_mb = total_reduction / 1024
         self.log(f"総削減量: {total_reduction_mb:.2f} MB")
         self.log("フォルダ処理完了！")
+
+    def process_folder_groups_to_zip(self, input_dir, output_dir, quality, target_height, min_size_kb):
+        """input直下の各フォルダを処理してZIP化"""
+        temp_dir = os.path.join(self.exe_dir, "temp_folder_work")
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        target_folders = [
+            os.path.join(input_dir, name)
+            for name in os.listdir(input_dir)
+            if os.path.isdir(os.path.join(input_dir, name))
+        ]
+        if not target_folders:
+            self.log("エラー: input直下に処理対象フォルダが見つかりません")
+            return
+
+        self.log(f"処理対象フォルダ: {len(target_folders)}")
+        for folder_path in target_folders:
+            self.process_single_folder_to_zip(
+                folder_path,
+                output_dir,
+                temp_dir,
+                quality,
+                target_height,
+                min_size_kb
+            )
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        self.log("フォルダZIPモード処理完了！")
     
     def process_zip_file(self, zip_path, output_dir, temp_dir, quality, target_height, min_size_kb):
         """単一のZIPファイルを処理"""
@@ -232,6 +320,11 @@ class ImageOptimizerApp:
         for i, (abs_path, rel_path) in enumerate(image_files, 1):
             original_size_kb = os.path.getsize(abs_path) / 1024
             if min_size_kb > 0 and original_size_kb < min_size_kb:
+                # しきい値未満の画像は再圧縮せず、そのままZIPへ残す
+                passthrough_path = os.path.join(output_jpg_dir, rel_path)
+                passthrough_dir = os.path.dirname(passthrough_path)
+                os.makedirs(passthrough_dir, exist_ok=True)
+                shutil.copy2(abs_path, passthrough_path)
                 self.log(f"{rel_path}: {original_size_kb:.2f} KB (しきい値未満のためスキップ)")
                 self.log(f"ZIP内処理中: {i}/{len(image_files)}")
                 continue
@@ -307,8 +400,10 @@ class ImageOptimizerApp:
             try:
                 if process_type == "folder":
                     self.process_folder_images(input_dir, output_dir, quality, target_height, min_size_kb)
-                else:
+                elif process_type == "zip":
                     self.process_zip_files(input_dir, output_dir, quality, target_height, min_size_kb)
+                else:
+                    self.process_folder_groups_to_zip(input_dir, output_dir, quality, target_height, min_size_kb)
             except Exception as e:
                 self.log(f"処理中にエラーが発生しました: {e}")
             finally:
