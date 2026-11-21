@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -132,32 +133,40 @@ class ImageOptimizerApp:
         self.log_text.see(tk.END)
         self.root.update_idletasks()
         
-    def optimize_image(self, input_path, output_path, quality, target_height):
+    def optimize_image(self, input_path, output_path, quality, target_height, *, in_place=False):
         """1つの画像を最適化"""
         try:
-            img = Image.open(input_path)
-            icc_profile = img.info.get('icc_profile')
-            
-            # RGBA → RGB変換
-            if img.mode == 'RGBA':
-                img = img.convert('RGB')
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # リサイズ
-            if img.height > target_height:
-                aspect_ratio = img.width / img.height
-                target_width = int(target_height * aspect_ratio)
-                img = img.resize((target_width, target_height), Image.LANCZOS)
-            
-            # サイズ計算（上書き前の元サイズを先に取得）
-            original_size = os.path.getsize(input_path) / 1024
+            with Image.open(input_path) as source:
+                icc_profile = source.info.get('icc_profile')
+                img = source.convert('RGB')
 
-            # JPEG保存
-            img.save(output_path, 'JPEG', quality=quality, icc_profile=icc_profile)
-            
-            # 新しいサイズを取得
-            new_size = os.path.getsize(output_path) / 1024
+            if img.height > target_height:
+                target_width = max(1, int(target_height * img.width / img.height))
+                img = img.resize((target_width, target_height), Image.LANCZOS)
+
+            original_size = os.path.getsize(input_path) / 1024
+            if in_place:
+                # 元画像を変更する前に、同じフォルダ内でJPEGを最後まで書き込む。
+                with tempfile.NamedTemporaryFile(dir=os.path.dirname(output_path), delete=False) as temp:
+                    temp_path = temp.name
+                try:
+                    img.save(temp_path, 'JPEG', quality=quality, icc_profile=icc_profile)
+                    new_size = os.path.getsize(temp_path) / 1024
+                    if os.path.basename(input_path) == os.path.basename(output_path):
+                        os.replace(temp_path, output_path)
+                    elif os.name == 'nt':
+                        # Windowsのrenameは、変換先が既に存在する場合は失敗する。
+                        os.rename(temp_path, output_path)
+                    else:
+                        # 既存のJPEGを上書きせず、書き込み済みのファイルを公開する。
+                        os.link(temp_path, output_path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+            else:
+                img.save(output_path, 'JPEG', quality=quality, icc_profile=icc_profile)
+                new_size = os.path.getsize(output_path) / 1024
+
             reduction = original_size - new_size
             
             return reduction, original_size, new_size
@@ -228,29 +237,47 @@ class ImageOptimizerApp:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
+        in_place = os.path.samefile(input_dir, output_dir)
+
         # 画像ファイル一覧取得
-        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+        image_files = sorted(
+            name for name in os.listdir(input_dir)
+            if name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
+            and os.path.isfile(os.path.join(input_dir, name))
+        )
         if not image_files:
             self.log("処理対象の画像ファイルが見つかりません")
             return
             
         self.log(f"処理対象: {len(image_files)} ファイル")
         total_reduction = 0
-        i=0
-        
-        # 処理
-        for image_file in image_files:
-            i+=1
+
+        for i, image_file in enumerate(image_files, 1):
             input_path = os.path.join(input_dir, image_file)
             original_size_kb = os.path.getsize(input_path) / 1024
             if min_size_kb > 0 and original_size_kb < min_size_kb:
                 self.log(f"{image_file}: {original_size_kb:.2f} KB (しきい値未満のためスキップ)")
                 self.log(f"処理中: {i}/{len(image_files)}")
                 continue
-            base_name = os.path.splitext(image_file)[0]
-            output_path = os.path.join(output_dir, f"{base_name}.jpg")
-            reduction, original_size, new_size = self.optimize_image(input_path, output_path, quality, target_height)
-            if new_size > 0:  # エラーでない場合
+            base_name, extension = os.path.splitext(image_file)
+            output_name = image_file if in_place and extension.lower() == ".jpg" else f"{base_name}.jpg"
+            output_path = os.path.join(output_dir, output_name)
+            remove_source = in_place and output_name != image_file
+            if remove_source and os.path.lexists(output_path):
+                self.log(f"{image_file}: 変換先 {output_name} が既に存在するためスキップ")
+                self.log(f"処理中: {i}/{len(image_files)}")
+                continue
+
+            reduction, original_size, new_size = self.optimize_image(
+                input_path, output_path, quality, target_height, in_place=in_place
+            )
+            if new_size > 0:
+                if remove_source:
+                    try:
+                        os.remove(input_path)
+                    except OSError as error:
+                        self.log(f"{image_file}: JPEG保存済み。元画像を削除できませんでした: {error}")
+                        reduction = 0
                 self.log(f"{image_file}: {original_size:.2f} KB -> {new_size:.2f} KB")
             self.log(f"処理中: {i}/{len(image_files)}")
             total_reduction += reduction
